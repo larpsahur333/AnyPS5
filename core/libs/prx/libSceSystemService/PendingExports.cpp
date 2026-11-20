@@ -35,6 +35,9 @@ constexpr std::int32_t LastPSButtonEventType = 0x20000002;
 
 std::atomic<std::intptr_t> nextActivationHandle{0x1000};
 
+std::atomic<std::uint64_t> shellUiStatus{0};
+std::atomic<bool> gnmCompositorOnScreenProfilerFlag{false};
+
 bool EmptyPrivacyDefinitionKey(const char* key) {
     if (key == nullptr) return false;
     char first = 1;
@@ -885,8 +888,7 @@ int APS5_VABI sceShellCoreUtilGetFsckProgress(const char* titleId, std::uint32_t
 }
 
 bool APS5_VABI sceShellCoreUtilGetGnmCompositorOnScreenProfilerFlag() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return gnmCompositorOnScreenProfilerFlag.load(std::memory_order_relaxed);
 }
 
 int APS5_VABI sceShellCoreUtilGetHidConfigFileInfoString(char* value, std::size_t capacity, std::int32_t configIndex) {
@@ -1035,7 +1037,12 @@ int APS5_VABI sceShellCoreUtilGetTitleWorkaroundFileString(char* value, std::siz
 }
 
 int APS5_VABI sceShellCoreUtilGetUIStatus(std::uint64_t* status) {
-    NotImplemented_nid_no_patch(__func__);
+    if (status == nullptr) return ShellCoreInvalidArgument;
+    const std::uint64_t localStatus = shellUiStatus.load(std::memory_order_relaxed);
+    const int savedErrno = errno;
+    const bool copied = GuestCopyOut_nid_no_patch(status, &localStatus, sizeof(localStatus));
+    errno = savedErrno;
+    if (!copied) return ShellCoreInvalidArgument;
     return 0;
 }
 
@@ -1345,7 +1352,7 @@ int APS5_VABI sceShellCoreUtilSetGameLiveStreamingStatus(std::int32_t active) {
 }
 
 int APS5_VABI sceShellCoreUtilSetGnmCompositorOnScreenProfilerFlag(std::int32_t enabled) {
-    NotImplemented_nid_no_patch(__func__);
+    gnmCompositorOnScreenProfilerFlag.store(enabled != 0, std::memory_order_relaxed);
     return 0;
 }
 
@@ -1410,7 +1417,9 @@ int APS5_VABI sceShellCoreUtilSetSystemBGWaveState(std::uint32_t state) {
 }
 
 int APS5_VABI sceShellCoreUtilSetUIStatus(std::uint64_t status, std::uint64_t mask) {
-    NotImplemented_nid_no_patch(__func__);
+    std::uint64_t current = shellUiStatus.load(std::memory_order_relaxed);
+    while (!shellUiStatus.compare_exchange_weak(current, (current & ~mask) | (status & mask), std::memory_order_relaxed)) {
+    }
     return 0;
 }
 
