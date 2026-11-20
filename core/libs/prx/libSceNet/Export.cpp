@@ -32,6 +32,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdarg>
 #include <cstdio>
 #include <cstddef>
 #include <cstring>
@@ -1020,6 +1021,40 @@ std::optional<std::uint32_t> InterfaceIdOfHostIndex(std::uint32_t index) {
         if (HostInterfaceIndex(interfaceId) == index) return interfaceId;
     }
     return std::nullopt;
+}
+
+std::string& AppendFormat(std::string& text, const char* format, ...) {
+    std::array<char, 512> buffer{};
+    va_list arguments;
+    va_start(arguments, format);
+    const int length = std::vsnprintf(buffer.data(), buffer.size(), format, arguments);
+    va_end(arguments);
+    if (length <= 0) return text;
+    if (static_cast<std::size_t>(length) < buffer.size()) {
+        text.append(buffer.data(), static_cast<std::size_t>(length));
+        return text;
+    }
+    std::vector<char> large(static_cast<std::size_t>(length) + 1);
+    va_start(arguments, format);
+    std::vsnprintf(large.data(), large.size(), format, arguments);
+    va_end(arguments);
+    text.append(large.data(), static_cast<std::size_t>(length));
+    return text;
+}
+
+int WriteShowText(const std::string& text, char* buffer) {
+    if (buffer == nullptr) {
+        std::fwrite(text.data(), 1, text.size(), stdout);
+        std::fflush(stdout);
+        return 0;
+    }
+    const std::size_t limit = static_cast<std::size_t>(NET_SHOW_BUFFER_SIZE);
+    std::string truncated = text.substr(0, limit - 1);
+    truncated.push_back('\0');
+    const int savedErrno = errno;
+    const bool copied = GuestCopyOut_nid_no_patch(buffer, truncated.data(), truncated.size());
+    errno = savedErrno;
+    return copied ? 0 : fail(NET_EFAULT);
 }
 
 }  // namespace
@@ -2693,17 +2728,17 @@ static std::string endpoint_text(const sockaddr_storage& address) {
     return host + ":" + (port == 0 ? std::string("*") : std::to_string(port));
 }
 
-int APS5_VABI sceNetShowNetstat(void) {
+static std::string FormatNetstat() {
     std::vector<std::pair<int, Sock>> sockets;
     std::vector<std::pair<int, std::string>> epolls;
     {
         std::lock_guard lock(g_mutex);
-        if (!g_net_inited) return fail(NET_ENOTINIT);
         sockets.assign(g_socks.begin(), g_socks.end());
         epolls.assign(g_epoll_names.begin(), g_epoll_names.end());
     }
     const int pid = getpid_nid_postfix();
-    std::printf("--- ID, type, [self/R/S/RE/SE//NB], ... ---\n");
+    std::string text;
+    AppendFormat(text, "--- ID, type, [self/R/S/RE/SE//NB], ... ---\n");
     for (const int type : {NET_SOCK_DGRAM, NET_SOCK_STREAM, NET_SOCK_RAW}) {
         for (auto it = sockets.rbegin(); it != sockets.rend(); ++it) {
             const auto& [id, socket] = *it;
@@ -2723,17 +2758,24 @@ int APS5_VABI sceNetShowNetstat(void) {
             if (sock_buffer_size(source, false, receive) != 0) receive = 0;
             const char* kind = type == NET_SOCK_STREAM ? "tcp" : type == NET_SOCK_DGRAM ? "udp" : "raw";
             const char* state = type != NET_SOCK_STREAM ? "OPENED" : socket.listening ? "LISTEN" : connected ? "ESTABLISHED" : "CLOSED";
-            std::printf("ID: %4d (%5s,  0) *....-%c %s pid=0x%08x %s\n", id, kind, socket.native->nonblock ? '*' : '.', state, static_cast<unsigned>(pid), socket.name.c_str());
-            std::printf("  Local : %s%28s\n", endpoint_text(local).c_str(), "");
-            std::printf("  Remote: %s%28s\n", endpoint_text(remote).c_str(), "");
-            std::printf("  Send-Q: 0/%d TX: 0bps/0bps, dropped 0 (0) \n", send);
-            std::printf("  Recv-Q: 0/%d RX: 0bps/0bps, dropped 0\n", receive);
+            AppendFormat(text, "ID: %4d (%5s,  0) *....-%c %s pid=0x%08x %s\n", id, kind, socket.native->nonblock ? '*' : '.', state, static_cast<unsigned>(pid), socket.name.c_str());
+            AppendFormat(text, "  Local : %s%28s\n", endpoint_text(local).c_str(), "");
+            AppendFormat(text, "  Remote: %s%28s\n", endpoint_text(remote).c_str(), "");
+            AppendFormat(text, "  Send-Q: 0/%d TX: 0bps/0bps, dropped 0 (0) \n", send);
+            AppendFormat(text, "  Recv-Q: 0/%d RX: 0bps/0bps, dropped 0\n", receive);
         }
     }
     for (auto it = epolls.rbegin(); it != epolls.rend(); ++it)
-        std::printf("ID: %4d (epoll)        *....-. OPENED pid=0x%08x %s\n", it->first, static_cast<unsigned>(pid), it->second.c_str());
-    std::fflush(stdout);
-    return 0;
+        AppendFormat(text, "ID: %4d (epoll)        *....-. OPENED pid=0x%08x %s\n", it->first, static_cast<unsigned>(pid), it->second.c_str());
+    return text;
+}
+
+int APS5_VABI sceNetShowNetstat(void) {
+    {
+        std::lock_guard lock(g_mutex);
+        if (!g_net_inited) return fail(NET_ENOTINIT);
+    }
+    return WriteShowText(FormatNetstat(), nullptr);
 }
 
 int APS5_VABI sceNetShowNetstatWithMemory(int memid) {
@@ -3328,39 +3370,43 @@ int APS5_VABI sceNetResolverAbort(int rid, int flags) {
     return 0;
 }
 
-int APS5_VABI sceNetShowIfconfig() {
-    {
-        std::lock_guard lock(g_mutex);
-        if (!g_net_inited) return fail(NET_ENOTINIT);
-    }
+static std::string FormatIfconfig() {
     const auto dotted = [](std::uint32_t address) {
         char text[INET_ADDRSTRLEN] = {};
         in_addr value{};
         value.s_addr = address;
         return std::string(inet_ntop(AF_INET, &value, text, sizeof(text)) != nullptr ? text : "0.0.0.0");
     };
+    std::string text;
     std::uint32_t address = 0;
     std::uint32_t netmask = 0;
     std::uint32_t mtu = 0;
     if (NetCtlHostIpv4Address_nid_no_patch(&address, &netmask, &mtu)) {
         NetEtherAddr mac{};
         sceNetGetMacAddress(&mac, 0);
-        std::printf("eth0 (index=1)\n");
-        std::printf("   Type:Ethernet HWaddr:%02x:%02x:%02x:%02x:%02x:%02x\n", mac.data[0], mac.data[1], mac.data[2], mac.data[3], mac.data[4], mac.data[5]);
-        std::printf("   inet:%s/%s Bcast:%s\n", dotted(address).c_str(), dotted(netmask).c_str(), dotted(address | ~netmask).c_str());
-        std::printf("   UP BROADCAST MULTICAST INTERNET CONNECTED MTU:%u(max:%u) \n", mtu, mtu);
+        AppendFormat(text, "eth0 (index=1)\n");
+        AppendFormat(text, "   Type:Ethernet HWaddr:%02x:%02x:%02x:%02x:%02x:%02x\n", mac.data[0], mac.data[1], mac.data[2], mac.data[3], mac.data[4], mac.data[5]);
+        AppendFormat(text, "   inet:%s/%s Bcast:%s\n", dotted(address).c_str(), dotted(netmask).c_str(), dotted(address | ~netmask).c_str());
+        AppendFormat(text, "   UP BROADCAST MULTICAST INTERNET CONNECTED MTU:%u(max:%u) \n", mtu, mtu);
     }
-    std::printf("lo0 (index=2)\n");
-    std::printf("   inet:127.0.0.1/255.0.0.0\n");
-    std::printf("   inet6:::1/128\n");
-    std::printf("   UP MULTICAST CONNECTED MTU:16384(max:16384) \n");
+    AppendFormat(text, "lo0 (index=2)\n");
+    AppendFormat(text, "   inet:127.0.0.1/255.0.0.0\n");
+    AppendFormat(text, "   inet6:::1/128\n");
+    AppendFormat(text, "   UP MULTICAST CONNECTED MTU:16384(max:16384) \n");
     std::array<std::uint32_t, 2> servers{};
     NetCtlHostDnsServers_nid_no_patch(servers.data(), servers.size());
-    std::printf("dns addresses\n");
-    std::printf("   %s, %s\n", dotted(servers[0]).c_str(), dotted(servers[1]).c_str());
-    std::printf("   ::, ::\n");
-    std::fflush(stdout);
-    return 0;
+    AppendFormat(text, "dns addresses\n");
+    AppendFormat(text, "   %s, %s\n", dotted(servers[0]).c_str(), dotted(servers[1]).c_str());
+    AppendFormat(text, "   ::, ::\n");
+    return text;
+}
+
+int APS5_VABI sceNetShowIfconfig() {
+    {
+        std::lock_guard lock(g_mutex);
+        if (!g_net_inited) return fail(NET_ENOTINIT);
+    }
+    return WriteShowText(FormatIfconfig(), nullptr);
 }
 
 extern const std::uint8_t in6addr_any_nid_postfix[16] = {};
@@ -3935,9 +3981,10 @@ int APS5_VABI sceNetUsleep(int microseconds) {
 }
 
 int APS5_VABI sceNetShowIfconfigForBuffer(char* buffer, std::int32_t bufferSize, std::int32_t poolId) {
+    (void)poolId;
     if (!net_initialized()) return fail(NET_ENOTINIT);
     if (buffer != nullptr && bufferSize < NET_SHOW_BUFFER_SIZE) return fail(NET_EINVAL);
-    NotImplemented_nid_no_patch(__func__);
+    return WriteShowText(FormatIfconfig(), buffer);
 }
 
 int APS5_VABI sceNetShowRouteForBuffer(char* buffer, std::int32_t bufferSize, std::int32_t poolId) {
@@ -3947,9 +3994,10 @@ int APS5_VABI sceNetShowRouteForBuffer(char* buffer, std::int32_t bufferSize, st
 }
 
 int APS5_VABI sceNetShowNetstatForBuffer(char* buffer, std::int32_t bufferSize, std::int32_t poolId) {
+    (void)poolId;
     if (!net_initialized()) return fail(NET_ENOTINIT);
     if (buffer != nullptr && bufferSize < NET_SHOW_BUFFER_SIZE) return fail(NET_EINVAL);
-    NotImplemented_nid_no_patch(__func__);
+    return WriteShowText(FormatNetstat(), buffer);
 }
 
 int APS5_VABI sceNetShowNetstatEx(std::uint32_t flags) {
@@ -3957,9 +4005,10 @@ int APS5_VABI sceNetShowNetstatEx(std::uint32_t flags) {
 }
 
 int APS5_VABI sceNetShowNetstatExForBuffer(char* buffer, std::int32_t bufferSize, std::int32_t poolId, std::uint32_t flags) {
+    (void)poolId;
     if (!net_initialized()) return fail(NET_ENOTINIT);
     if ((flags & 0x10000) != 0 || (buffer != nullptr && bufferSize < NET_SHOW_BUFFER_SIZE)) return fail(NET_EINVAL);
-    NotImplemented_nid_no_patch(__func__);
+    return WriteShowText(FormatNetstat(), buffer);
 }
 
 const char* APS5_VABI sceNetInetNtopWithScopeId(std::int32_t family, const void* address, char* text, std::uint32_t size, std::uint32_t scopeId) {
