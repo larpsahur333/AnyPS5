@@ -22,6 +22,8 @@ static_assert(sizeof(HmdAssemblyError) == 16);
 namespace {
 
 std::atomic<bool> initialized{false};
+std::atomic<std::uint8_t> debugMode{0};
+std::atomic<std::uint8_t> debugTextMode{0};
 
 std::int32_t Initialize(const Hmd::InitializeParam* param) {
     if (initialized.load()) return Hmd::AlreadyInitialized;
@@ -32,7 +34,22 @@ std::int32_t Initialize(const Hmd::InitializeParam* param) {
     errno = savedErrno;
     if (!copied) return Hmd::ParameterNull;
     if (localParam.reserved0) return Hmd::UnsupportedFeature;
-    return initialized.exchange(true) ? Hmd::AlreadyInitialized : 0;
+    if (initialized.exchange(true)) return Hmd::AlreadyInitialized;
+    debugMode.store(0);
+    debugTextMode.store(0);
+    return 0;
+}
+
+std::int32_t ReadConfigurationByte(std::uint8_t* output, const std::atomic<std::uint8_t>& value) {
+    if (!output) return Hmd::ParameterNull;
+    if (!initialized.load()) return Hmd::NotInitialized;
+    const std::uint8_t copy = value.load();
+    const int savedErrno = errno;
+    if (!GuestCopyOut_nid_no_patch(output, &copy, sizeof(copy))) {
+        errno = savedErrno;
+        return Hmd::ParameterNull;
+    }
+    return 0;
 }
 
 std::uint32_t CompiledSdkVersion() {
@@ -203,8 +220,7 @@ int APS5_VABI sceHmdInternalSetCrashReportCommand(std::uint8_t command) {
 }
 
 int APS5_VABI sceHmdInternalGetDebugTextMode(std::uint8_t* mode) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ReadConfigurationByte(mode, debugTextMode);
 }
 
 int APS5_VABI sceHmdDistortionGetWorkMemoryAlign(void) {
@@ -429,8 +445,7 @@ int APS5_VABI sceHmdReprojectionQueryOnionBuffAlign(void) {
 }
 
 int APS5_VABI sceHmdInternalGetDebugMode(std::uint8_t* mode) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ReadConfigurationByte(mode, debugMode);
 }
 
 bool APS5_VABI sceHmdInternalIsMiniAppVr2d(void) {
@@ -632,7 +647,8 @@ int APS5_VABI sceHmdInternalSeparateModeClose(void) {
 }
 
 int APS5_VABI sceHmdInternalSetDebugTextMode(std::uint8_t mode) {
-    NotImplemented_nid_no_patch(__func__);
+    if (!initialized.load()) return Hmd::NotInitialized;
+    debugTextMode.store(mode);
     return 0;
 }
 
@@ -667,7 +683,8 @@ int APS5_VABI sceHmdInternalDfuOpen(void) {
 }
 
 int APS5_VABI sceHmdInternalSetDebugMode(std::uint8_t mode) {
-    NotImplemented_nid_no_patch(__func__);
+    if (!initialized.load()) return Hmd::NotInitialized;
+    debugMode.store(mode);
     return 0;
 }
 
