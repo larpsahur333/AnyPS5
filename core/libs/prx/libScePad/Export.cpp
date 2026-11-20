@@ -52,6 +52,19 @@ std::array<std::atomic<int>, PAD_SPECIAL_HANDLE_COUNT> g_specialUsers{};
 std::atomic_bool g_initialized{false};
 std::atomic_bool g_particularMode{false};
 
+struct PadEditSettings {
+    std::atomic_bool profileEditing{false};
+    std::atomic<std::uint32_t> profile{0};
+    std::atomic_bool selectButtonCustomize{false};
+};
+
+constexpr std::size_t PAD_HANDLE_SETTING_SLOTS = PAD_SPECIAL_HANDLE + PAD_SPECIAL_HANDLE_COUNT;
+std::array<PadEditSettings, PAD_HANDLE_SETTING_SLOTS> g_editSettings{};
+
+PadEditSettings& EditSettingsOf(int handle) {
+    return g_editSettings[static_cast<std::size_t>(handle)];
+}
+
 bool SpecialHandle(int handle) {
     if (handle < PAD_SPECIAL_HANDLE || handle >= PAD_SPECIAL_HANDLE + PAD_SPECIAL_HANDLE_COUNT) return false;
     const int slot = handle - PAD_SPECIAL_HANDLE;
@@ -1071,28 +1084,43 @@ int APS5_VABI scePadResetLeonardo(std::int32_t handle) {
 }
 
 int APS5_VABI scePadSetProfileEditMode(std::int32_t handle, bool enabled, std::uint32_t profile) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (!Pad::IsInitialized()) return PAD_ERROR_NOT_INITIALIZED;
+    if (!KnownHandle(handle)) return PAD_ERROR_INVALID_HANDLE;
+    PadEditSettings& settings = EditSettingsOf(handle);
+    settings.profile.store(profile, std::memory_order_relaxed);
+    settings.profileEditing.store(enabled, std::memory_order_relaxed);
+    return PAD_OK;
 }
 
 int APS5_VABI scePadGetProfileEditMode(std::int32_t handle, std::int32_t* mode) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (!Pad::IsInitialized()) return PAD_ERROR_NOT_INITIALIZED;
+    if (mode == nullptr) return PAD_ERROR_INVALID_ARG;
+    if (!KnownHandle(handle)) return PAD_ERROR_INVALID_HANDLE;
+    const std::int32_t value = EditSettingsOf(handle).profileEditing.load(std::memory_order_relaxed) ? 1 : 0;
+    const int savedErrno = errno;
+    const bool copied = GuestCopyOut_nid_no_patch(mode, &value, sizeof(value));
+    errno = savedErrno;
+    if (!copied) return PAD_ERROR_INVALID_ARG;
+    return PAD_OK;
 }
 
 int APS5_VABI scePadGetProfileEditModeLeonardo(std::int32_t handle) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (!Pad::IsInitialized()) return PAD_ERROR_NOT_INITIALIZED;
+    if (!KnownHandle(handle)) return PAD_ERROR_INVALID_HANDLE;
+    return EditSettingsOf(handle).profileEditing.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
 int APS5_VABI scePadSetSelectButtonCustomizeMode(std::int32_t handle, bool enabled) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (!Pad::IsInitialized()) return PAD_ERROR_NOT_INITIALIZED;
+    if (!KnownHandle(handle)) return PAD_ERROR_INVALID_HANDLE;
+    EditSettingsOf(handle).selectButtonCustomize.store(enabled, std::memory_order_relaxed);
+    return PAD_OK;
 }
 
 int APS5_VABI scePadGetSelectButtonCustomizeMode(std::int32_t handle) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (!Pad::IsInitialized()) return PAD_ERROR_NOT_INITIALIZED;
+    if (!KnownHandle(handle)) return PAD_ERROR_INVALID_HANDLE;
+    return EditSettingsOf(handle).selectButtonCustomize.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
 int APS5_VABI scePadSetToggleAllReleaseLeonardo(std::int32_t handle) {
